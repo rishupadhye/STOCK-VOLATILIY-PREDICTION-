@@ -1,0 +1,656 @@
+---
+title: "Stock Volatility Prediction"
+author: "Dingyu Sun | Sharvil Turbadkar | Jian Jian | Rishabh Upadhyay"
+date: "Dec/02/2020"
+output: pdf_document
+mainfont: Arial
+---
+
+
+```{r setup, include=F}
+knitr::opts_chunk$set(echo = F)
+rm(list=ls())
+options(warn = -1)
+```
+
+
+# Abstract
+
+#### We investigated the long-term stock return of several individual companies including Apple Inc. (AAPL), Alphabet Inc. (GOOG), and Microsoft Corporation (MSFT), and created the time series model to predict the beta in the future. Also, we analyzed the relationship between the individual company stock return and the Dow Jones Industrial Average market return. Our project goal is to predict the beta value by building several time-series models and comparing the prediction with the beta value we computed from the CAPM formula. In this project, we used the backward elimination method to construct the model. The accuracy of these three models was not good enough, the adjusted R-square can be improved in the future by adding more features. 
+
+```{r load_package, include=F}
+require(tidyverse)
+require(quantmod)
+require(lubridate)
+require(data.table)
+require(fastDummies)
+require(grid)
+require(gridExtra)
+require(gridGraphics)
+require(ggplot2)
+require(reshape2)
+require(corrplot)
+```
+
+# 1.Introduction
+
+## 1.1 Describe the purpose
+#### Information and data play a central role in the current industry field. Companies related to the finance field use modeling techniques to compute and predict the market and companies' stock trends. "The stock market is a market that enables the seamless exchange of buying and selling of company stocks. Every Stock Exchange has its own Stock Index value. The index is the average value that is calculated by combining several stocks."[1]. The index can transfer the information of the whole stock market, and predict the future trend. The stock market has a huge impact on people, the company's development, the country's economy, and the pattern of world economic development. In that regard, predicting the stock trends based on the current situation can maximize the profit and minimize the risk.
+
+#### There is a long time history of predicting the stock return, by predicting the stock return investors can revise their portfolio allocation, make a better investment decision, and understand the risk-return trade-off. Beta is an important measurement in the finance field and it can send substantial information to the investor. Beta measures the volatility of an individual stock in relation to the overall market. The beta of the individual stock measures the degree of its deviation from the market. A beta value larger than one represents the stock swings more than the market stock. If a stock's beta is less than one, it means that the stock has a lower movement than the market. In this project, we utilized different features to build the time series model and predict the beta value.
+
+#### Another important concept is the risk premium, it is an expected return that investment return in excess of the risk-free rate of return. We used the quantmod package to download the finance data from Yahoo Finance. To get the respective risk premium, we imported the risk-free return data and substracted the difference between the market return and the risk free-return, in this project the risk premium helped us compute the beta value.
+
+#### The dataset has 12 columns, the Dow Jones Industrial Average monthly market return, the Apple Inc. (AAPL), Alphabet Inc. (GOOG), Microsoft Corporation (MSFT) monthly market return, and their respective auto regression term. We also added the extended dataset of the 3-Month Treasury Bill to calculate the risk premium.
+
+#### This project organized as follow, we built three time-series model. We used three models to predict the beta value and compare the predicted value with the true beta values which were computed by the CAPM formula. The first model is the full model with all features. We ruled out the insignificant variables first. The second model is a "time trend + autoregressive + seasonal category dummies" model with three lagged variables. Based on the result of the second model, the third model is a "time trend + autoregressive" model but with only one lagged variable. We applied backward elimination during the training process. The performance of the model improves every after each round of the feature evaluation.
+
+
+## 1.2 Key findings of the project
+
+- The adjusted R-square of all three models is less than 0.1, which means these three models do not have a good performance, thus to train a better model, we need to add more features into the model.
+- From the result of the three models, we found that beta has a relationship with the time trend and did not show any seasonal pattern.
+
+
+# 2. Dataset description
+
+## 2.1 Document source and description
+
+#### The data source: : Yahoo Finance& FRED
+
+#### In this project, we used a finance package called "quantmod" to download the finance data from the website. By entering the symbol of the stock and website name also the data period, we can download the data from that website. In this project, we set the start date as 2010 and the end date as 2020, and download the monthly data from Yahoo Finance.
+
+```{r load_data, include=F}
+# Time range
+start_date <- "2010-11-27"
+end_date <- "2020-11-27"
+
+# Target symbols
+symbols <- c('AAPL', 'GOOG', 'MSFT', '^DJI')
+
+# Stock prices
+stock_prices <- lapply(symbols, function(sym) {
+  getSymbols(sym, from=start_date, to=end_date, auto.assign=F, src = 'yahoo')
+}) %>%
+  do.call(merge, .) %>%
+  as.data.frame(.) %>%
+  select(ends_with(".Adjusted")) %>%
+  setnames(old=colnames(.), new=symbols) %>%
+  mutate(date=floor_date(index(as.xts(.)), 'month') ) %>%
+  rename('DJI'='^DJI')
+
+# Excess returns of stocks
+stock_returns <- lapply(symbols, function(sym) {
+  monthlyReturn(getSymbols(sym, from=start_date, to=end_date, auto.assign=F, src = 'yahoo'))
+}) %>%
+  do.call(merge, .) %>%
+  as.data.frame(.) %>%
+  setnames(old=colnames(.), new=symbols) %>%
+  mutate(date=floor_date(index(as.xts(.)), 'month') ) %>%
+  rename('DJI'='^DJI')
+
+# Risk free rate
+market_returns <- getSymbols('TB3MS', from=start_date, to=end_date, src = 'FRED', auto.assign = F) %>%
+  data.frame(
+  date = index(.)
+  ) %>%
+  as.data.frame(.) %>%
+  mutate(TB3MS=TB3MS/100) %>%
+  rename('rf'='TB3MS')
+
+returns <- left_join(stock_returns, market_returns, by='date')
+
+risk_premium <- select(returns, -rf) - returns$rf
+
+```
+
+
+#### The final dataset contains data from a ten-year window. It contains 291 rows and 12 columns. It can be divided into 4 parts, the first part is the beta values of each company; the second part is the trends and the seasonal variables, and the autoregression variables; the third part is the returns of the market and companies; the last part is the dummy variables, we created two variables to represent three companies.
+
+#### The true beta value was computed by using the CAPM formula. We computed the subtracting result of the market return and the risk-free return and the result of companies return and the risk-free return, after that we built a linear model to get the coefficient, and the coefficient is the beta. And the CAPM believes no intercept in its model because the market will sell or buy the asset back to the CAPM model.
+
+$$R_e-R_f = \beta * (R_m - R_f)$$
+
+
+```{r preprocessing}
+# Risk free rate
+beta_window <- 24
+
+# Calculate the beta based on the moving window
+for (j in c('AAPL', 'GOOG', 'MSFT')) {
+  for (i in (1+beta_window):dim(risk_premium)[1]) {
+    risk_premium_stock <- risk_premium[(i-beta_window):i, j]
+    risk_premium_market <- risk_premium[(i-beta_window):i, 'DJI']
+    CAPM_beta <- lm(risk_premium_stock ~ 0+risk_premium_market)$coefficients[[1]]
+    risk_premium[i, paste0(j, '_beta')] <- CAPM_beta
+  }
+}
+
+# Create dummy variable
+risk_premium <- quarter(risk_premium$date) %>% 
+  dummy_cols(remove_first_dummy = T) %>% 
+  select(2:4) %>% 
+  setnames(old = colnames(.), new = c('spring','summer', 'fall')) %>% 
+  mutate(date=risk_premium$date) %>% 
+  left_join(risk_premium, by='date')
+  
+# Create auto regression term
+create_auto_regression_term <- function(df, lag) {
+  symbols <- c('AAPL', 'GOOG', 'MSFT', 'DJI')
+  
+  n_row <-dim(df)[1]
+  n_col <-dim(df)[2]
+  empty_matrix <- matrix(data=NA, ncol=n_col, nrow=lag)
+  colnames(empty_matrix) <- colnames(df)
+  df <- rbind(df, empty_matrix)
+  
+  lag_matrix <- list()
+  for (j in symbols) {
+    premium <- df[1:n_row, j]
+    lag_term <- c(rep(NA, lag), premium)
+    lag_matrix[[j]] <- lag_term
+  }
+  
+  lag_matrix <- do.call(cbind, lapply(lag_matrix, as.data.frame))
+  lag_colnames <- c()
+  for (j in symbols) {
+    lag_colnames <- c(lag_colnames, paste0(j, "_lag_", lag))
+  }
+  colnames(lag_matrix) <- lag_colnames
+  
+  return (cbind(df, lag_matrix))
+}
+risk_premium <- risk_premium %>%
+  create_auto_regression_term(1) %>%
+  create_auto_regression_term(4) %>%
+  create_auto_regression_term(12)
+
+# Clean the data
+risk_premium <- risk_premium %>% drop_na()
+
+risk_premium$trend <- 1:dim(risk_premium)[1]
+
+get_stock_risk_premium <- function (df, symbol) {
+  lag_col_names <- colnames(df)
+  lag_col_names <- (lag_col_names[grepl(paste0(symbol, "_lag_*"), lag_col_names)])
+  beta_col_name <- paste0(symbol, '_beta')
+  df <- select(risk_premium, c(all_of(beta_col_name), "trend", "spring", "summer", "fall", 'DJI', all_of(symbol), all_of(lag_col_names))) %>%
+            rename(c("return"=all_of(symbol), "beta"=all_of(beta_col_name)))
+  colnames(df) <- gsub(paste0(symbol, '_'),'',colnames(df))
+  return (df)
+}
+
+df_AAPL <- get_stock_risk_premium(risk_premium, 'AAPL')
+df_GOOG <- get_stock_risk_premium(risk_premium, 'GOOG')
+df_MSFT <- get_stock_risk_premium(risk_premium, 'MSFT')
+
+df_AAPL$GOOG <- 1
+df_AAPL$AALP <- 0
+
+df_GOOG$GOOG <- 0
+df_GOOG$AALP <- 1
+
+df_MSFT$GOOG <- 0
+df_MSFT$AALP <- 0
+
+df <- do.call("rbind", list(df_AAPL, df_GOOG, df_MSFT))
+
+knitr::kable(t(head(df)))
+```
+
+## 2.2 Time span and number of observations
+
+#### The three lagged variables included the previous month, the previous 4 months, and the previous year. The three seasonal categorical variables included spring, summer, and fall.
+
+```{r }
+ts_return_scatter_plot <- function(returns, premium, y, main, file_name) {
+  ts <- ggplot(returns, aes_string(x='date', y=y)) + 
+    geom_smooth(method="loess", formula=y~x, color = "red") +
+    ggtitle('Time series - Stock Price') +
+    geom_line()
+  return_scatter <- ggplot(premium, aes_string(x='date', y=y)) + 
+      geom_smooth(method="loess", formula=y~x, color = "red") + 
+      ggtitle('Scatter plot - Risk Preimum') +
+      geom_point()
+  plots <- list(ts, return_scatter)
+  grid_plot <- do.call(grid.arrange,  c(plots , nrow = 2, top = main))
+  suppressMessages(ggsave(paste0(file_name, '.png')))
+}
+
+```
+
+## 2.3 Time series plot and scatter plots to indicate primary relationships existing in your data.
+
+### 2.3.1 Time series& scatter plot of the Dow Jones Industrial
+
+#### The time series plot shows a daily positive relationship to the market price of the Dow Jones Industrial. The relationship between the date and the risk premium seems flat.
+
+```{r }
+ts_return_scatter_plot(stock_prices, risk_premium, 'DJI', 'Dow Jones Industrial', 'EDA_DJI')
+
+```
+
+### 2.3.2 Time seriess& scatter plot of Apple Inc.
+
+#### Compared with the Dow Jones Industrial plot, the time series plot of Apple Inc like a quadratic plot. With the date increasing, the stock price of Apple Inc increased at a fast speed. The scatter plot does not show much difference from the previous one.
+
+```{r echo=F}
+ts_return_scatter_plot(stock_prices, risk_premium, 'AAPL', 'Apple Inc.', 'EDA_AAPL')
+
+```
+
+### 2.3.3 Time seriess& scatter plot plot of the Alphabet Inc.
+
+#### The time series plot shows that the date seemingly has a linear relationship with the stock price of Alphabet Inc, and the point spread of the scatter plot is more spread than the previous two plots.
+```{r echo=F}
+ts_return_scatter_plot(stock_prices, risk_premium, 'GOOG', 'Alphabet Inc.', 'EDA_GOOG')
+
+```
+
+### 2.3.4 Time series plot of the Microsoft Corporation.
+
+#### The trend of the time series plot is similar to Apple Inc, and the variation of the scatter plot is more spread than the previous two plots.
+
+```{r echo=F}
+ts_return_scatter_plot(stock_prices, risk_premium, 'MSFT', 'Microsoft Corporation', 'EDA_MSFT')
+
+```
+
+## 2.4 Summary statistics(mean, standard deviation and correlation)
+
+### 2.4.1 Risk Premium distribution 
+```{r}
+ggplot(data = melt(select(risk_premium, c('AAPL', 'GOOG', 'MSFT', 'DJI')), id.vars=NULL), aes(x=variable, y=value)) +
+  geom_boxplot(aes(fill=variable)) + 
+  ggtitle('Box plot - Risk Premium')
+
+suppressMessages(ggsave('distribution_risk_premium.png'))
+
+```
+
+#### Comparing with other companies, Apple Inc has the largest risk premium distribution, and Microsoft Corporation has the smallest risk premium distribution, which means Apple Inc might have the highest risk.
+
+### 2.4.2 Correlations
+
+#### From the correlation plot, we learned that the Dow Jones Industrial has a positive correlation with the three companies' returns. The cross-point of that pair shows dark blue. Summer and the three companies return have a positive, but their relationship is not as strong as the previous one, and their cross-point shows light blue.
+
+```{r}
+cor_matrix <- cor(select(df, -'beta'), method = "pearson")
+corrplot(cor_matrix, type="upper")
+```
+
+### 2.4.3 Scatter plot of the independent variables vs dependent variables
+
+#### From the scatter plot we can see that relationship between "trend" and the beta is like a quadric, and the points of other plots spread randomly that no pattern exists in the graph.
+
+```{r, fig.height=15, fig.width=15}
+build_model <- function(fn, data, plot_style, main, file_name) {
+  model <- lm(fn, data)
+  residual <- resid(model)
+  var_names <- all.vars(fn)
+  y <- var_names[1]
+  xs <- var_names[-1]
+  plots <- list()
+  for (x in xs) {
+    plots[[length(plots) + 1]] <- ggplot(data, aes_string(x=x, y=y)) + 
+      geom_smooth(method="loess", formula=y~x, color = "red") + 
+      plot_style
+    plots[[length(plots) + 1]] <- ggplot(data, aes_string(x=x, y=residual)) +
+      geom_smooth(method="loess", formula=y~x, color = "red") + 
+      plot_style + 
+      ylab('Residual') + 
+      geom_hline(yintercept=0, color = "blue")
+      geom_vline(xintercept=0, color = "blue")
+  }
+  
+  grid_plot <- do.call(grid.arrange,  c(plots , ncol = 2, top = main))
+  suppressMessages(ggsave(paste0(file_name, '.png')))
+  
+}
+
+build_model(beta~trend+DJI+return+spring+summer+fall+lag_1+lag_4+lag_12, df, geom_point(), 'Beta - Full Model', 'beta_full_model')
+```
+
+
+
+# 3. Model Selection
+
+## 3.1 First Model
+
+#### Use time series model to forescast the beta.
+
+#### Time-series forecasting models are models that can predict the future stock return based on the historical observed values. The autoregressive model is the most common model used in value prediction, basically it depends on the previous values and created a linear model. In the first model, we used all variables and additional trend square to build a full model a predict the bata.
+
+### 3.1.1 Data preprocessing
+
+#### The data point randomly scattered after preprocessing the data.
+
+```{r}
+df$trend_2 <- df$trend^2
+
+build_model(beta~trend_2, df, geom_point(), 'Beta - Trend square', 'beta_trend_square')
+
+```
+
+
+### 3.1.2 Variables for model 
+|Notations|
+|-|-|
+|$Beta$|Response Variable (The cumputed beta value))|
+|$trend$|Explanatory Variable (The trend index over time)|
+|$trend^2$|Explanatory Variable (The quadratic trend index over time)|
+|$spring$|Explanatory Variable (Dummy variable)|
+|$summer$|Explanatory Variable(Dummy variable)|
+|$fall$|Explanatory Variable (Dummy variable)|
+|$DJI$|Explanatory Variable(Stock return of the Dow Jones Industrial)|
+|$return$|Explanatory Variable (Stock return of the three companies)|
+|$lag_1$|Explanatory Variable(The seasonal first lag of the beta)|
+|$lag_4$|Explanatory Variable(The seasonal four lag of the beta)|
+|$lag_12$|Explanatory Variable(The seasonal tweleve lag of the beta)|
+|$GOOG$|Explanatory Variable(Dummy variable)|
+|$AAPL$|Explanatory Variable (Dummy variable)|
+
+### 3.1.3 Build a model
+1. Time series model
+```{r}
+model_1 <- lm(beta~trend+trend_2+spring+summer+fall+DJI+return+lag_1+lag_4+lag_12+GOOG+AALP, data=df)
+```
+
+2. Model summary and evaluation
+```{r}
+
+knitr::kable(summary(model_1)$coefficients)
+```
+
+- Estimtaed regression line is:
+$$ \widehat{Beta} = 0.6990055 +  0.0103949 \times trend -0.0000941 \times trend^2 -0.0016342 \times spring + 0.0306064 \times summer$$
+$$+ 0.0000273 \times fall + 0.5959206 \times DJI + 0.0343212 \times return + 0.0568659 \times y_t-1 + 0.2846647 \times y_t-4 $$ 
+$$ -0.0281881 \times y_t-12 + 0.0218218 \times GOOG  -0.0374889\times AALP$$
+
+- 8.37% of the variation in the Beta is accounted for by independent vairables.
+
+3. P-value
+```{r}
+knitr::kable(data.frame('P Value'=summary(model_1)$coefficients[,4]))
+```
+
+- Only two variables's pvalue less than 0.05, $trend$ and $trend^2$. 
+- There is 0.0000153 chance that the relationship between $trend$ and $beta$ is due to chance.
+- There is 0.0000687 chance that the relationship between $trend^2$ and $beta$ is due to chance.
+
+- The p-value of the model is p = 0.01622
+- There is almost 0.01622 that the overall model is due to chance.
+
+4. Foecast
+- Used the model to predict the lastest month's stock price and computed the MSE and MAE.
+```{r}
+df_test <- tail(df, 1)
+mse_1 <- mean((df_test$beta - predict(model_1, df_test))^2)
+mae_1 <- mean(abs(df_test$beta - predict(model_1, df_test)))
+knitr::kable(data.frame(MSE=mse_1, MAE=mae_1))
+
+```
+
+5. Plot the prediction
+- Plot the feature values and predictions.
+
+```{r}
+prediction_plot <- function(df, model, file_name) {
+  df_real_model <- select(df, c('trend', 'beta'))
+  df_real_model$type <- 'real'
+  
+  df_predict_model <- select(df, 'trend')
+  df_predict_model$beta <- predict(model, df)
+  df_predict_model$type <- 'prediction'
+  
+  df_model_1 <- rbind(df_real_model, df_predict_model)
+  
+  ggplot(df_model_1, aes(x=trend, y=beta)) +
+    geom_point() +
+    facet_grid(type ~ .)
+  suppressMessages(ggsave(paste0(file_name, '.png')))
+  
+}
+
+prediction_plot(df, model_1, 'prediction_model_1')
+
+```
+
+#### Based on the result of model 1, we choose to drop variables with a high p-value, such as spring, summer, fall, one year lagged variable, and then observe the adjusted R-square at the next round of modeling. The prediction plot like the winsorized result of the original beta value.
+
+## 3.2 Second Model
+
+#### Use time series model to forescast the beta.
+
+#### In the second model, we created a trend and autoregressive model to predict the beta.
+
+### 3.2.1 Variables for model 
+|Notations|
+|-|-|
+|$Beta$|Response Variable (The cumputed beta value)|
+|$trend$|Explanatory Variable (The trend index over time)|
+|$trend^2$|Explanatory Variable (The quadratic trend index over time)|
+|$DJI$|Explanatory Variable(Stock return of the Dow Jones Industrial)|
+|$return$|Explanatory Variable (Stock return of the three companies)|
+|$lag_1$|Explanatory Variable(The seasonal first lag of the beta)|
+|$lag_4$|Explanatory Variable(The seasonal four lag of the beta)|
+|$GOOG$|Explanatory Variable(Dummy variable)|
+|$AAPL$|Explanatory Variable (Dummy variable)|
+
+### 3.1.2 Build a model
+1. Create a model use the the trend variable and sesonal lagged variable to build the model
+```{r}
+model_2 <- lm(beta~trend+trend_2+DJI+return+lag_1+lag_4+GOOG+AALP, data=df)
+```
+
+2. Model summary and evaluation
+```{r}
+knitr::kable(summary(model_2)$coefficients)
+```
+
+- Estimtaed regression line is:
+$$ \widehat{Beta} = 0.7031216 +  0.0104464 \times trend -0.0000943 \times trend^2 + 0.5633199 \times DJI + 0.0569356 \times return$$
+$$ + 0.0786199 \times y_t-1 + 0.2921390 \times y_t-4 + 0.0219564 \times GOOG  -0.0372091\times AALP$$
+
+- 8.143% of the variation in the Beta is accounted for by the independent variables.
+ 
+3. P-value
+```{r}
+knitr::kable(data.frame('P Value'=summary(model_2)$coefficients[,4]))
+```
+
+- Only two variables's pvalue less than 0.05, $trend$ and $trend^2$. 
+- There is 0.0000120 chance that the relationship between $trend$ and $beta$ is due to chance.
+- There is 0.0000586 chance that the relationship between $trend^2$ and $beta$ is due to chance.
+
+- The p-value of the model is p = 0.002117
+- There is almost 0.002117 that the overall model is due to chance.
+
+4. Forecast
+- Used the model to predict the lastest month's stock price and computed the MSE and MAE.
+```{r}
+mse_2 <- mean((df_test$beta - predict(model_2, df_test))^2)
+mae_2 <- mean(abs(df_test$beta - predict(model_2, df_test)))
+knitr::kable(data.frame(MSE=mse_2, MAE=mae_2))
+
+```
+
+5. Plot the prediction
+- Plot the feature values and predictions.
+
+```{r}
+prediction_plot(df, model_2, 'prediction_model_2')
+```
+
+#### From the p-value result of model 2 we will drop variables with a high p-value, companies return, company dummy variable, one month lagged variables, and then observe the R-square of the next model.
+
+## 3.3 Third Model
+
+#### Use time series model to forescat the Beta.
+
+#### In the third model, we created a trend and autoregressive model to predict the beta.
+
+### 3.3.1 Variables for model 
+|Notations|
+|-|-|
+|$Beta$|Response Variable (The cumputed beta value)|
+|$trend$|Explanatory Variable (The trend index over time)|
+|$trend^2$|Explanatory Variable (The quadratic trend index over time)|
+|$DJI$|Explanatory Variable(Stock return of the Dow Jones Industrial)|
+|$lag_1$|Explanatory Variable(The seasonal first lag of the beta)|
+|$lag_4$|Explanatory Variable(The seasonal four lag of the beta)|
+
+### 3.3.2 Build a model
+1. Create a model use the the trend variable and sesonal lagged variable to build the model
+```{r}
+model_3 <- lm(beta~trend+trend_2+DJI+lag_4, data=df)
+```
+
+2. Model summary and evaluation
+```{r}
+knitr::kable(summary(model_3)$coefficients)
+```
+
+- Estimtaed regression line is:
+$$ \widehat{Beta} = 0.0000000 +  0.0000115 \times trend + 0.0000579 \times trend^2 + 0.1169623 \times DJI + 0.2296484 \times y_t-4 $$
+
+- 7.336% of the variation in the Beta is accounted for by the independent variables.
+
+3. P-value
+```{r}
+knitr::kable(data.frame('P Value'=summary(model_3)$coefficients[,4]))
+```
+
+- Only two variables's pvalue less than 0.05, $trend$ and $trend^2$. 
+- There is 0.0000115 chance that the relationship between $trend$ and $beta$ is due to chance.
+- There is 0.0000579 chance that the relationship between $trend^2$ and $beta$ is due to chance.
+
+- The p-value of the model is p = 0.0002132
+- There is almost 0.0002132 that the overall model is due to chance.
+
+4. Forecast
+- Used the model to predict the lastest month's stock price and computed the MSE and MAE.
+```{r}
+mse_3 <- mean((df_test$beta - predict(model_3, df_test))^2)
+mae_3 <- mean(abs(df_test$beta - predict(model_3, df_test)))
+knitr::kable(data.frame(MSE=mse_3, MAE=mae_3))
+
+```
+
+5. Plot the prediction
+- Plot the feature values and predictions.
+
+```{r}
+prediction_plot(df, model_3, 'prediction_model_3')
+```
+
+
+# 4. Final Model Interpretation
+
+## 4.1 Model assumption
+
+1:  $E(\epsilon|x_i) = 0$
+
+2:  $\epsilon$ ~ $N[0, \epsilon^2]$
+
+3:  $\epsilon$ are independent variables
+
+## 4.2 Estimated regression line
+
+$$ \widehat{Beta} = 0.0000000 +  0.0000115 \times trend + 0.0000579 \times trend^2 + 0.1169623 \times DJI + 0.2296484 \times y_t-4 $$
+
+## 4.3 Interpretation of the slope, intercept and R2
+
+### 4.3.1 Interpret the slope for trend.
+
+#### As each month passes, beta is expected to increase 0.0000694, regardless of the beta in the same month of the previous four months.
+
+### 4.3.2 Interpret the slope for DJI.
+
+#### The beta is expected to increase 0.1169623 on average, holding the effect of time fixed.
+
+### 4.3.3 Interpret the slope for seasonal variable.
+
+#### The beta is expected to increase 0.2296484 on average, holding the effect of time and market return fixed.
+
+### 4.3.4 Interpret the intercept.
+
+#### At time = 0 and market return = 0 and beta in the same month of the previous 4 months = 0, the beta is expected to be 0 on average.
+
+### 4.3.5 Interpret the R^2
+
+#### The R-squared of model 3 is 0.07336, adjusted R-squared of model 3 is 0.0604. The adjusted R-squared in model 1 is 0.0441, the adjusted R-squared in model 2 is 0.05537, compared with the two models, model 3 is the better one. Even though model 3 is the best one, the R-square of model 3 is still small enough, and we need to add more features to improve the model performance.
+
+## 4.4 Hypothesis test 
+
+#### Does the beta change has the seasonal pattern?
+
+- step 1:
+
+\qquad\qquad $H_0: \beta_4 = 0$ 
+\qquad\qquad $H_a$: $\beta_4 \neq 0$
+
+- step 2:
+
+\qquad\qquad Find the p-value for this coefficient, 0.2296484
+
+- step 3:
+
+\qquad\qquad Reject the null when p-value < 5%
+
+- step 4:
+
+\qquad\qquad Since p-value = 22.96% > 5%. We can't reject the null. We can't prove that the beta has a seasonal pattern.
+
+## 4.5 Residual analysis
+
+# 5. Summay and Conclusion Remarks
+
+## 5.1 Summarize the results of the report in a concise fashion
+
+####  To sum up, in this project our goal is to predict the beta value based on the time series model. We used seasonal variables including 4 season and lagged variables, we also used the linear trend variable and its quadratic variable, we separated the stock return into the market and the three companies. The first model is the full model after we analyze the result. We constructed the second model, dropped some variables that have a large p-value, and the third model building also follows the same method. Thus, by evaluating the adjusted R-square and p-value we used the backward elimination method to organize our project, and this method can provide good guidance for our project development. 
+
+#### The interesting is the adjusted R-square of the three models is very small, all of them lower than 0.1, thus, all of these three models have not fully explained the economic phenomenon. In order to get a better prediction in the future, we need to add more features to our model.
+
+#### From the p-value perspective to analyze the result, we only found that two variables can provide better influence to the model prediction, trend, and its quadratic pattern.
+
+## 5.2 Comments on the quality of data and reliability of concomitant inferential statements(what type of data would improve the reliability of your statements)?
+
+#### The different industries may have different effects on model performance. In this project, we selected three companies all of which are technology companies, and we choose the market return from the Dow Jones Industrial. To improve the reliability we can select the stock return from other companies or select the other market stock return data.
+
+## 5.3 Include ideas that you have about future investigations
+
+- Since the natures of each industry vary from one to another, we propose to collect more features and build the model industry by industry.
+
+- We plan on making a much more robust model by adding returns of other companies from myriad domains and get a holistic idea of which features explain the variation in beta most.
+
+
+# 6. Appendix
+
+- quantmod package
+
+---
+function (Symbols = NULL, env = parent.frame(), reload.Symbols = FALSE, 
+    verbose = FALSE, warnings = TRUE, src = "yahoo", symbol.lookup = TRUE, 
+    auto.assign = getOption("getSymbols.auto.assign", TRUE))
+---
+
+## 6.1 Additional graphs and tables
+
+## 6.2 Reference
+
+#### [1]"CAPM: Capital Asset Pricing Model: CAPM Formula: Capital Market Line." M1 Finance, 7 Nov. 2019, www.m1finance.com/articles-2/capm-capital-asset-pricing-model/. 
+
+#### [2] https://www.wallstreetmojo.com/capm-beta-definition-formula-calculate-beta-in-excel/ -The following article discusses about the impact of myriad factors on the value of beta and which industries tend to have higher betas and which industries tend to have a lower beta .The value of beta depends upon the nature of the business (cyclic ) along with the financial debt the  company owes 
+
+#### [3] https://finvert.home.blog/2019/02/28/how-helpful-is-beta/-  The following article discusses about the applications of beta and also dives deep into its limitations
+
+#### [4] https://tgwhite.github.io/R_training/
+
+#### [5] Chen, J. (2020, August 28). Market Risk Premium. Retrieved December 02, 2020, from https://www.investopedia.com/terms/m/marketriskpremium.asp
+
+#### [6] http://www.quantmod.com/examples/ 
+
+#### [7] https://www.kdnuggets.com/2020/01/stock-market-forecasting-time-series-analysis
+
+
